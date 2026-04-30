@@ -1,0 +1,10 @@
+mode: improved
+ka: 0.00048
+kb: 0.00018
+sigma0: 0.020
+lam: 0.006
+rho: 0.82
+nominal_gain: 0.991
+nominal_bias: 0.0
+compensation_strength: 0.72
+bin_edges: [0, 85, 135]

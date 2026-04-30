@@ -1,0 +1,35 @@
+dataset:
+  root: ./data
+  name: cifar10
+  num_classes: 10
+model:
+  name: resnet18_cifar
+  base_channels: 64
+train:
+  epochs: 30
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  batch_size: 128
+  num_workers: 2
+  label_smoothing: 0.0
+  save_best_only: false
+eval:
+  batch_size: 256
+  num_workers: 2
+  temperature_points: [0, 25, 50, 75, 85, 95, 105, 115, 125, 135]
+  block_mse_temperature: 105
+  noise_temperature: 75
+  noise_scan_values: [0.005, 0.010, 0.015, 0.020, 0.030, 0.040, 0.050]
+  bin_sweep_temperature: 105
+  bin_sweep_all_temps: true
+system:
+  seed: 2026
+  deterministic: true
+  device: auto
+outputs:
+  checkpoint_dir: ./outputs/checkpoints
+  csv_dir: ./outputs/csv
+  figure_dir: ./outputs/figures
+  log_dir: ./outputs/logs
+  experiment_name: resnet18_cifar10_temp_comp
