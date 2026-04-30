@@ -15,22 +15,22 @@ dataset:
 # Model registry: which models to train/evaluate
 # -----------------------------------------------------------
 models:
-  active: [resnet18, resnet34, vgg16, mobilenetv2]
+  active: [resnet18_cifar, resnet34_cifar, vgg16_cifar, mobilenetv2_cifar]
 
-  resnet18:
+  resnet18_cifar:
     arch: resnet18_cifar
     base_channels: 64
 
-  resnet34:
+  resnet34_cifar:
     arch: resnet34_cifar
     base_channels: 64
 
-  vgg16:
+  vgg16_cifar:
     arch: vgg16_cifar
     base_channels: 64
     batch_norm: true
 
-  mobilenetv2:
+  mobilenetv2_cifar:
     arch: mobilenetv2_cifar
     width_mult: 1.0
 
