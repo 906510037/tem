@@ -1,8 +1,4 @@
-"""CIFAR-10 版本的 ResNet18。
-
-这个文件的目标是提供一个适合 32x32 输入的残差网络，并且把每个
-residual block 暴露出来，方便后续在 block 最终输出后注册 hook。
-"""
+"""CIFAR-10 ResNet variants with injection-point registration."""
 
 from __future__ import annotations
 
@@ -13,14 +9,12 @@ import torch
 from torch import Tensor, nn
 
 from .blocks import BasicBlock
+from .factory import register_model
+from .injection import InjectionPoints, register_injection
 
 
 class CIFARResNet(nn.Module):
-    """适配 CIFAR-10 输入尺寸的 ResNet。
-
-    与 ImageNet 版本不同，这里不使用 7x7 大卷积和 maxpool 开头，
-    而是改用更适合 32x32 图像的 3x3 stem。
-    """
+    """ResNet adapted for 32x32 CIFAR inputs."""
 
     def __init__(
         self,
@@ -66,7 +60,7 @@ class CIFARResNet(nn.Module):
         return nn.Sequential(*layers)
 
     def iter_residual_blocks(self) -> Iterable[Tuple[str, nn.Module]]:
-        """按固定顺序暴露所有 residual block，便于统一注入非理想行为。"""
+        """Yield all residual blocks as (name, module) pairs."""
         for layer_name in ("layer1", "layer2", "layer3", "layer4"):
             layer = getattr(self, layer_name)
             for index, block in enumerate(layer):
@@ -76,7 +70,6 @@ class CIFARResNet(nn.Module):
         return [name for name, _ in self.iter_residual_blocks()]
 
     def forward_features(self, x: Tensor) -> Tuple[Tensor, OrderedDict[str, Tensor]]:
-        """返回最终特征和每个 residual block 的输出。"""
         features: OrderedDict[str, Tensor] = OrderedDict()
         x = self.stem(x)
         for name, block in self.iter_residual_blocks():
@@ -94,6 +87,34 @@ class CIFARResNet(nn.Module):
         return logits
 
 
+# ---------------------------------------------------------------------------
+#  Builders — registered in the model factory
+# ---------------------------------------------------------------------------
+
+@register_model("resnet18_cifar")
+def build_resnet18_cifar(num_classes: int = 10, base_channels: int = 64) -> CIFARResNet:
+    return CIFARResNet(BasicBlock, (2, 2, 2, 2), num_classes, base_channels)
+
+
+@register_model("resnet34_cifar")
+def build_resnet34_cifar(num_classes: int = 10, base_channels: int = 64) -> CIFARResNet:
+    return CIFARResNet(BasicBlock, (3, 4, 6, 3), num_classes, base_channels)
+
+
+# ---------------------------------------------------------------------------
+#  Injection points — registered in the injection registry
+# ---------------------------------------------------------------------------
+
+@register_injection("resnet18_cifar")
+@register_injection("resnet34_cifar")
+def resnet_injection(model: CIFARResNet) -> InjectionPoints:
+    return list(model.iter_residual_blocks())
+
+
+# ---------------------------------------------------------------------------
+#  Legacy convenience function (kept for backwards compatibility)
+# ---------------------------------------------------------------------------
+
 def resnet18_cifar(num_classes: int = 10, base_channels: int = 64) -> CIFARResNet:
-    """构造一个标准的 CIFAR-10 ResNet18。"""
-    return CIFARResNet(num_classes=num_classes, base_channels=base_channels)
+    """Legacy convenience wrapper — prefer create_model('resnet18_cifar', ...)."""
+    return build_resnet18_cifar(num_classes=num_classes, base_channels=base_channels)

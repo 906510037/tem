@@ -1,3 +1,10 @@
+"""Bin sweep using the unified experiment config.
+
+Usage:
+    python scripts/eval_bin_sweep.py
+    python scripts/eval_bin_sweep.py --model resnet18
+"""
+
 from __future__ import annotations
 
 import argparse
@@ -9,74 +16,71 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from engine.evaluate import run_bin_sweep
-from engine.utils import build_cifar10_loaders, load_yaml, load_checkpoint, seed_everything, select_device
-from models import resnet18_cifar
+from engine.utils import (
+    build_cifar10_loaders,
+    get_model_output_dir,
+    get_temperature_points,
+    load_checkpoint,
+    load_experiment_config,
+    seed_everything,
+    select_device,
+)
+from models import create_model, get_injection_points
 from nonideal.hooks import NonIdealHookManager
 from nonideal.temp_model import NonIdealConfig, TemperatureNonIdeality
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Run compensation bin sweep over the configured temperatures.")
-    parser.add_argument("--base-config", default="configs/base.yaml")
-    parser.add_argument("--config-2bin", default="configs/temp_improved_2bin.yaml")
-    parser.add_argument("--config-4bin", default="configs/temp_improved_4bin.yaml")
-    parser.add_argument("--config-6bin", default="configs/temp_improved_6bin.yaml")
-    parser.add_argument("--checkpoint", default="outputs/checkpoints/best.pt")
-    parser.add_argument("--output", default="outputs/csv/bin_sweep.csv")
-    return parser.parse_args()
+def main():
+    parser = argparse.ArgumentParser(description="Run compensation bin sweep.")
+    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--model", type=str, default=None)
+    parser.add_argument("--checkpoint", type=str, default=None)
+    parser.add_argument("--output", type=str, default=None)
+    args = parser.parse_args()
 
+    config_path = args.config or (ROOT / "configs" / "experiment.yaml")
+    config = load_experiment_config(Path(config_path))
+    model_name = args.model or config["models"]["active"][0]
+    model_cfg = config["models"][model_name]
+    arch = model_cfg["arch"]
+    system_cfg = config["system"]
+    seed = system_cfg["seed"]
+    seed_everything(seed, system_cfg["deterministic"])
+    device = select_device(system_cfg["device"])
 
-def main() -> None:
-    args = parse_args()
-    base_config = load_yaml(args.base_config)
-    config_2bin = load_yaml(args.config_2bin)
-    config_4bin = load_yaml(args.config_4bin)
-    config_6bin = load_yaml(args.config_6bin)
+    out_dirs = get_model_output_dir(config, model_name)
+    checkpoint_path = args.checkpoint or str(out_dirs["checkpoint"] / "best.pt")
 
-    seed_everything(base_config["system"]["seed"], base_config["system"]["deterministic"])
-    device = select_device(base_config["system"]["device"])
-    _, test_loader = build_cifar10_loaders(base_config, train=False)
-
-    model = resnet18_cifar(
-        num_classes=base_config["dataset"]["num_classes"],
-        base_channels=base_config["model"]["base_channels"],
-    )
-    load_checkpoint(args.checkpoint, model)
+    _, test_loader = build_cifar10_loaders(config, train=False)
+    model = create_model(model_name, model_cfg,
+                         num_classes=config["dataset"]["num_classes"])
+    load_checkpoint(checkpoint_path, model)
     model.to(device)
 
-    blocks = list(model.iter_residual_blocks())
-    hook_managers = {
-        "2": NonIdealHookManager(
-            blocks,
-            TemperatureNonIdeality(NonIdealConfig.from_dict(config_2bin), noise_seed=base_config["system"]["seed"]),
-            mode="replace_with_nonideal",
-        ),
-        "4": NonIdealHookManager(
-            blocks,
-            TemperatureNonIdeality(NonIdealConfig.from_dict(config_4bin), noise_seed=base_config["system"]["seed"]),
-            mode="replace_with_nonideal",
-        ),
-        "6": NonIdealHookManager(
-            blocks,
-            TemperatureNonIdeality(NonIdealConfig.from_dict(config_6bin), noise_seed=base_config["system"]["seed"]),
-            mode="replace_with_nonideal",
-        ),
-    }
+    bin_configs = config["nonideal"]["bins"]
+    active_sweep = bin_configs.get("active_sweep", ["2", "4", "6"])
 
-    eval_cfg = base_config["eval"]
+    blocks = get_injection_points(model, arch)
+    hook_managers = {}
+    for label in active_sweep:
+        imp = dict(config["nonideal"]["improved"])
+        imp["bin_edges"] = bin_configs[label]
+        hook_managers[label] = NonIdealHookManager(
+            blocks,
+            TemperatureNonIdeality(NonIdealConfig.from_dict(imp), noise_seed=seed),
+            mode="replace_with_nonideal",
+        )
+
+    tcfg = config["temperature"]
     temperatures = (
-        eval_cfg["temperature_points"]
-        if eval_cfg.get("bin_sweep_all_temps", True)
-        else eval_cfg["bin_sweep_temperature"]
+        get_temperature_points(config)
+        if tcfg.get("bin_sweep_all_temps", True)
+        else tcfg["block_mse_temperature"]
     )
     frame = run_bin_sweep(
-        model=model,
-        loader=test_loader,
-        device=device,
-        hook_managers=hook_managers,
-        temperature=temperatures,
-        noise_seed=base_config["system"]["seed"],
-        output_path=args.output,
+        model, test_loader, device, hook_managers,
+        temperatures, seed,
+        output_path=args.output or str(out_dirs["csv"] / "bin_sweep.csv"),
     )
     print(frame.to_string(index=False))
 

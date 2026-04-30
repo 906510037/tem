@@ -1,0 +1,110 @@
+# Unified experiment configuration — single source of truth.
+# Both run_experiment.py and scripts/*.py read from this file.
+
+system:
+  seed: 2026
+  deterministic: true
+  device: auto
+
+dataset:
+  name: cifar10
+  root: ./data
+  num_classes: 10
+
+# -----------------------------------------------------------
+# Model registry: which models to train/evaluate
+# -----------------------------------------------------------
+models:
+  active: [resnet18, resnet34, vgg16, mobilenetv2]
+
+  resnet18:
+    arch: resnet18_cifar
+    base_channels: 64
+
+  resnet34:
+    arch: resnet34_cifar
+    base_channels: 64
+
+  vgg16:
+    arch: vgg16_cifar
+    base_channels: 64
+    batch_norm: true
+
+  mobilenetv2:
+    arch: mobilenetv2_cifar
+    width_mult: 1.0
+
+# -----------------------------------------------------------
+# Training
+# -----------------------------------------------------------
+train:
+  epochs: 200
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 0.0005
+  batch_size: 128
+  num_workers: 2
+  label_smoothing: 0.1
+  warmup_epochs: 5
+  warmup_start_lr: 0.01
+  grad_clip_norm: 1.0
+  cutout: true
+  cutout_length: 16
+  checkpoint_topk: 3
+
+# -----------------------------------------------------------
+# Evaluation
+# -----------------------------------------------------------
+eval:
+  batch_size: 256
+  num_workers: 2
+
+# -----------------------------------------------------------
+# Temperature: 0–110 °C, step 2 °C
+# -----------------------------------------------------------
+temperature:
+  range: [0, 110]
+  step: 2
+  block_mse_temperature: 100
+  noise_temperature: 75
+  noise_scan_values: [0.005, 0.010, 0.015, 0.020, 0.030, 0.040, 0.050]
+  bin_sweep_all_temps: true
+
+# -----------------------------------------------------------
+# Non-ideality parameters
+# -----------------------------------------------------------
+nonideal:
+  original:
+    mode: original
+    ka: 0.00065
+    kb: 0.00025
+    sigma0: 0.030
+    lam: 0.008
+    nominal_gain: 0.980
+    nominal_bias: 0.0
+
+  improved:
+    mode: improved
+    ka: 0.00065
+    kb: 0.00025
+    sigma0: 0.030
+    lam: 0.008
+    rho: 0.55
+    nominal_gain: 0.980
+    nominal_bias: 0.0
+    compensation_strength: 0.45
+
+  bins:
+    "2": [0, 55, 110]
+    "3": [0, 37, 73, 110]
+    "4": [0, 28, 55, 83, 110]
+    "5": [0, 22, 44, 66, 88, 110]
+    "6": [0, 19, 37, 55, 73, 92, 110]
+    "7": [0, 16, 32, 48, 63, 79, 95, 110]
+    active_sweep: ["2", "3", "4", "5", "6", "7"]
+
+# -----------------------------------------------------------
+# Outputs
+# -----------------------------------------------------------
+outputs:
+  root: ./outputs

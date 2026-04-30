@@ -1,8 +1,10 @@
-"""一键运行完整实验 —— 所有参数集中在此文件修改。
+"""一键运行完整实验 —— 所有参数集中在 configs/experiment.yaml。
 
 使用方法:
-    python run_experiment.py              # 运行全部实验（训练 + 评估 + 画图）
-    python run_experiment.py --skip-train # 跳过训练，仅运行评估和画图
+    python run_experiment.py                  # 运行全部实验（训练 + 评估 + 画图）
+    python run_experiment.py --skip-train     # 跳过训练，仅运行评估和画图
+    python run_experiment.py --models resnet18  # 仅运行指定模型
+    python run_experiment.py --epochs 5       # 快速验证（覆盖 YAML 中 epoch 数）
 """
 
 from __future__ import annotations
@@ -11,12 +13,16 @@ import argparse
 import sys
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, Sequence
+from typing import Any, Dict
+
+import numpy as np
 
 ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 import torch
@@ -24,156 +30,34 @@ from torch import nn
 from torch.utils.data import DataLoader
 
 from engine.evaluate import evaluate_accuracy, evaluate_blockwise_mse
-from engine.metrics import aggregate_feature_mse, recovery_ratio, update_accuracy_counts
+from engine.metrics import aggregate_feature_mse, recovery_ratio
 from engine.train import fit
 from engine.utils import (
     build_cifar10_loaders,
     ensure_dir,
+    get_model_output_dir,
+    get_temperature_points,
     load_checkpoint,
-    save_checkpoint,
+    load_experiment_config,
     seed_everything,
     select_device,
 )
-from models import resnet18_cifar
-from nonideal.hooks import NonIdealHookManager
+from models import create_model, get_injection_points
+from nonideal.hooks import NonIdealHookManager, hook_session
 from nonideal.temp_model import NonIdealConfig, TemperatureNonIdeality
 
 
 # ============================================================
-#  所有可调参数集中在此区域，修改这里即可控制整个实验
+#  配置构建
 # ============================================================
 
-EXPERIMENT = {
-
-    "system": {
-        "seed": 2026,
-        "deterministic": True,
-        "device": "auto",
-    },
-
-    "dataset": {
-        "root": "./data",
-        "num_classes": 10,
-    },
-
-    "model": {
-        "base_channels": 64,
-    },
-
-    "train": {
-        "epochs": 30,
-        "lr": 0.1,
-        "momentum": 0.9,
-        "weight_decay": 0.0005,
-        "batch_size": 128,
-        "num_workers": 2,
-        "label_smoothing": 0.0,
-    },
-
-    "eval": {
-        "batch_size": 256,
-        "num_workers": 2,
-    },
-
-    "outputs": {
-        "checkpoint_dir": "./outputs/checkpoints",
-        "csv_dir": "./outputs/csv",
-        "figure_dir": "./outputs/figures",
-        "log_dir": "./outputs/logs",
-    },
-
-    # ----------------------------------------------------------
-    #  温度评估点（0 ~ 135°C，>85°C 为高温）
-    # ----------------------------------------------------------
-    "temperature_points": [0, 25, 50, 75, 85, 95, 105, 115, 125, 135],
-
-    # ----------------------------------------------------------
-    #  噪声扫描参数
-    # ----------------------------------------------------------
-    "noise_scan": {
-        "temperature": 75,
-        "sigma_values": [0.005, 0.010, 0.015, 0.020, 0.030, 0.040, 0.050],
-    },
-
-    # ----------------------------------------------------------
-    #  Block-wise MSE 评估温度
-    # ----------------------------------------------------------
-    "block_mse_temperature": 105,
-
-    # ----------------------------------------------------------
-    #  Original 模式参数（无补偿）
-    # ----------------------------------------------------------
-    "original": {
-        "mode": "original",
-        "ka": 0.00048,
-        "kb": 0.00018,
-        "sigma0": 0.020,
-        "lam": 0.006,
-        "nominal_gain": 0.991,
-        "nominal_bias": 0.0,
-    },
-
-    # ----------------------------------------------------------
-    #  Improved 模式参数（有补偿）
-    # ----------------------------------------------------------
-    "improved": {
-        "mode": "improved",
-        "ka": 0.00048,
-        "kb": 0.00018,
-        "sigma0": 0.020,
-        "lam": 0.006,
-        "rho": 0.82,
-        "nominal_gain": 0.991,
-        "nominal_bias": 0.0,
-        "compensation_strength": 0.72,
-    },
-
-    # ----------------------------------------------------------
-    #  补偿档位定义（2-bin / 4-bin / 6-bin）
-    # ----------------------------------------------------------
-    "bin_configs": {
-        "2": [0, 85, 135],
-        "4": [0, 35, 65, 95, 135],
-        "6": [0, 20, 40, 65, 85, 110, 135],
-    },
-
-    # ----------------------------------------------------------
-    #  Bin Sweep 评估方式
-    #  True  → 全温度范围平均（推荐，避免单点偏差）
-    #  False → 仅在 bin_sweep_temperature 单点评估
-    # ----------------------------------------------------------
-    "bin_sweep_all_temps": True,
-}
-
-
-# ============================================================
-#  以下为实验逻辑，一般无需修改
-# ============================================================
-
-
-def _build_base_config() -> Dict[str, Any]:
-    return {
-        "dataset": {**EXPERIMENT["dataset"], "name": "cifar10"},
-        "model": {**EXPERIMENT["model"], "name": "resnet18_cifar"},
-        "train": EXPERIMENT["train"],
-        "eval": EXPERIMENT["eval"],
-        "system": EXPERIMENT["system"],
-        "outputs": EXPERIMENT["outputs"],
-    }
-
-
-def _make_original_config() -> NonIdealConfig:
-    return NonIdealConfig.from_dict(EXPERIMENT["original"])
-
-
-def _make_improved_config(bin_key: str = "4") -> NonIdealConfig:
-    cfg = dict(EXPERIMENT["improved"])
-    cfg["bin_edges"] = EXPERIMENT["bin_configs"][bin_key]
-    return NonIdealConfig.from_dict(cfg)
+def _make_nonideal_config(params: Dict[str, Any]) -> NonIdealConfig:
+    return NonIdealConfig.from_dict(params)
 
 
 def _make_hook_manager(
-    blocks, config: NonIdealConfig, seed: int, mode: str = "replace_with_nonideal"
+    blocks: list, config: NonIdealConfig, seed: int,
+    mode: str = "replace_with_nonideal",
 ) -> NonIdealHookManager:
     return NonIdealHookManager(
         blocks,
@@ -182,37 +66,56 @@ def _make_hook_manager(
     )
 
 
-def step_train() -> Path:
-    config = _build_base_config()
-    seed_everything(config["system"]["seed"], config["system"]["deterministic"])
-    device = select_device(config["system"]["device"])
+# ============================================================
+#  训练
+# ============================================================
 
-    for key in ("checkpoint_dir", "csv_dir", "figure_dir", "log_dir"):
-        ensure_dir(config["outputs"][key])
+def step_train(config: Dict[str, Any], model_name: str, skip: bool = False
+               ) -> Path | None:
+    out_dirs = get_model_output_dir(config, model_name)
+    checkpoint_path = out_dirs["checkpoint"] / "best.pt"
+
+    if skip and checkpoint_path.exists():
+        print(f"[train] {model_name}: using cached checkpoint {checkpoint_path}")
+        return checkpoint_path
+
+    system_cfg = config["system"]
+    seed_everything(system_cfg["seed"], system_cfg["deterministic"])
+    device = select_device(system_cfg["device"])
 
     train_loader, test_loader = build_cifar10_loaders(config, train=True)
-    model = resnet18_cifar(
-        num_classes=config["dataset"]["num_classes"],
-        base_channels=config["model"]["base_channels"],
-    )
-    result = fit(model, train_loader, test_loader, config, device)
-    print(f"[train] best_accuracy={result.best_accuracy:.4f}")
+    model_cfg = config["models"][model_name]
+    model = create_model(model_name, model_cfg,
+                         num_classes=config["dataset"]["num_classes"])
+    result = fit(model, train_loader, test_loader, config, device,
+                 model_name=model_name)
+    print(f"[train] {model_name}: best_accuracy={result.best_accuracy:.4f}")
     return result.best_checkpoint
 
 
-def step_temperature_scan(model: nn.Module, loader: DataLoader, device: torch.device, seed: int, csv_dir: Path):
-    print("\n[1/4] Temperature scan ...")
-    blocks = list(model.iter_residual_blocks())
-    ideal_hooks = NonIdealHookManager(blocks, nonideality=None, mode="capture_only")
-    original_hooks = _make_hook_manager(blocks, _make_original_config(), seed)
-    improved_hooks = _make_hook_manager(blocks, _make_improved_config("4"), seed)
+# ============================================================
+#  温度扫描
+# ============================================================
 
-    temperatures = EXPERIMENT["temperature_points"]
+def step_temperature_scan(
+    model: nn.Module, loader: DataLoader, device: torch.device,
+    seed: int, config: Dict[str, Any], model_name: str,
+) -> pd.DataFrame:
+    print(f"\n[1/4] Temperature scan — {model_name} ...")
+    model_cfg = config["models"][model_name]
+    arch = model_cfg["arch"]
+    blocks = get_injection_points(model, arch)
+
+    ideal_hooks = NonIdealHookManager(blocks, nonideality=None, mode="capture_only")
+    orig_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["original"]), seed)
+    imp_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["improved"]), seed)
+
+    temperatures = get_temperature_points(config)
     rows = []
     for temp in temperatures:
         ideal_acc = evaluate_accuracy(model, loader, device, ideal_hooks, temp, seed)
-        orig_acc = evaluate_accuracy(model, loader, device, original_hooks, temp, seed)
-        imp_acc = evaluate_accuracy(model, loader, device, improved_hooks, temp, seed)
+        orig_acc = evaluate_accuracy(model, loader, device, orig_hooks, temp, seed)
+        imp_acc = evaluate_accuracy(model, loader, device, imp_hooks, temp, seed)
         rr = recovery_ratio(ideal_acc, orig_acc, imp_acc)
         rows.append({
             "temperature": temp,
@@ -221,59 +124,87 @@ def step_temperature_scan(model: nn.Module, loader: DataLoader, device: torch.de
             "improved": imp_acc,
             "recovery_ratio": rr,
         })
-        print(f"  T={temp:>5.0f}°C  Ideal={ideal_acc:.4f}  Orig={orig_acc:.4f}  Imp={imp_acc:.4f}  RR={rr:.4f}")
+        if int(temp) % 20 == 0 or temp == temperatures[-1]:
+            print(f"  T={temp:>5.0f}C  Ideal={ideal_acc:.4f}  "
+                  f"Orig={orig_acc:.4f}  Imp={imp_acc:.4f}  RR={rr:.4f}")
 
     frame = pd.DataFrame(rows)
-    csv_path = csv_dir / "accuracy_vs_temp.csv"
+    out_dirs = get_model_output_dir(config, model_name)
+    csv_path = out_dirs["csv"] / "accuracy_vs_temp.csv"
     frame.to_csv(csv_path, index=False)
     return frame
 
 
-def step_noise_scan(model: nn.Module, loader: DataLoader, device: torch.device, seed: int, csv_dir: Path):
-    print("\n[2/4] Noise scan ...")
-    blocks = list(model.iter_residual_blocks())
-    original_hooks = _make_hook_manager(blocks, _make_original_config(), seed)
-    improved_hooks = _make_hook_manager(blocks, _make_improved_config("4"), seed)
+# ============================================================
+#  噪声扫描
+# ============================================================
 
-    noise_cfg = EXPERIMENT["noise_scan"]
-    temperature = noise_cfg["temperature"]
-    sigma_values = noise_cfg["sigma_values"]
+def step_noise_scan(
+    model: nn.Module, loader: DataLoader, device: torch.device,
+    seed: int, config: Dict[str, Any], model_name: str,
+) -> pd.DataFrame:
+    print(f"\n[2/4] Noise scan — {model_name} ...")
+    model_cfg = config["models"][model_name]
+    arch = model_cfg["arch"]
+    blocks = get_injection_points(model, arch)
 
-    orig_module = original_hooks.nonideality
-    imp_module = improved_hooks.nonideality
+    orig_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["original"]), seed)
+    imp_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["improved"]), seed)
+
+    tcfg = config["temperature"]
+    temperature = tcfg["noise_temperature"]
+    sigma_values = tcfg["noise_scan_values"]
+
+    orig_module = orig_hooks.nonideality
+    imp_module = imp_hooks.nonideality
     orig_base_sigma = orig_module.config.sigma0
     imp_base_sigma = imp_module.config.sigma0
 
     rows = []
     try:
         for sigma0 in sigma_values:
-            orig_module.config = type(orig_module.config)(**{**orig_module.config.__dict__, "sigma0": sigma0})
-            imp_module.config = type(imp_module.config)(**{**imp_module.config.__dict__, "sigma0": sigma0})
-            orig_acc = evaluate_accuracy(model, loader, device, original_hooks, temperature, seed)
-            imp_acc = evaluate_accuracy(model, loader, device, improved_hooks, temperature, seed)
+            orig_module.config = type(orig_module.config)(
+                **{**orig_module.config.__dict__, "sigma0": sigma0})
+            imp_module.config = type(imp_module.config)(
+                **{**imp_module.config.__dict__, "sigma0": sigma0})
+            orig_acc = evaluate_accuracy(model, loader, device, orig_hooks, temperature, seed)
+            imp_acc = evaluate_accuracy(model, loader, device, imp_hooks, temperature, seed)
             rows.append({"sigma": sigma0, "original": orig_acc, "improved": imp_acc})
             print(f"  sigma0={sigma0:.3f}  Orig={orig_acc:.4f}  Imp={imp_acc:.4f}")
     finally:
-        orig_module.config = type(orig_module.config)(**{**orig_module.config.__dict__, "sigma0": orig_base_sigma})
-        imp_module.config = type(imp_module.config)(**{**imp_module.config.__dict__, "sigma0": imp_base_sigma})
+        orig_module.config = type(orig_module.config)(
+            **{**orig_module.config.__dict__, "sigma0": orig_base_sigma})
+        imp_module.config = type(imp_module.config)(
+            **{**imp_module.config.__dict__, "sigma0": imp_base_sigma})
 
     frame = pd.DataFrame(rows)
-    csv_path = csv_dir / "accuracy_vs_noise.csv"
+    out_dirs = get_model_output_dir(config, model_name)
+    csv_path = out_dirs["csv"] / "accuracy_vs_noise.csv"
     frame.to_csv(csv_path, index=False)
     return frame
 
 
-def step_block_mse(model: nn.Module, loader: DataLoader, device: torch.device, seed: int, csv_dir: Path):
-    print("\n[3/4] Block-wise MSE ...")
-    blocks = list(model.iter_residual_blocks())
-    temperature = EXPERIMENT["block_mse_temperature"]
+# ============================================================
+#  逐块 MSE
+# ============================================================
+
+def step_block_mse(
+    model: nn.Module, loader: DataLoader, device: torch.device,
+    seed: int, config: Dict[str, Any], model_name: str,
+) -> pd.DataFrame:
+    print(f"\n[3/4] Block-wise MSE — {model_name} ...")
+    model_cfg = config["models"][model_name]
+    arch = model_cfg["arch"]
+    blocks = get_injection_points(model, arch)
+
+    temperature = config["temperature"]["block_mse_temperature"]
 
     ideal_hooks = NonIdealHookManager(blocks, nonideality=None, mode="capture_only")
-    original_hooks = _make_hook_manager(blocks, _make_original_config(), seed)
-    improved_hooks = _make_hook_manager(blocks, _make_improved_config("4"), seed)
+    orig_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["original"]), seed)
+    imp_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["improved"]), seed)
 
-    orig_mse = evaluate_blockwise_mse(model, loader, device, ideal_hooks, original_hooks, temperature, seed)
-    imp_mse = evaluate_blockwise_mse(model, loader, device, ideal_hooks, improved_hooks, temperature, seed)
+    orig_mse = evaluate_blockwise_mse(model, loader, device, ideal_hooks, orig_hooks, temperature, seed)
+    imp_mse = evaluate_blockwise_mse(model, loader, device, ideal_hooks, imp_hooks, temperature, seed)
 
     rows = []
     for block_name in OrderedDict.fromkeys(list(orig_mse.keys()) + list(imp_mse.keys())):
@@ -287,27 +218,41 @@ def step_block_mse(model: nn.Module, loader: DataLoader, device: torch.device, s
             "improved_mse": i,
             "reduction_pct": reduction,
         })
-        print(f"  {block_name:<12s}  Orig={o:.6f}  Imp={i:.6f}  ↓{reduction:.1f}%")
+        print(f"  {block_name:<20s}  Orig={o:.6f}  Imp={i:.6f}  d={reduction:.1f}%")
 
     frame = pd.DataFrame(rows)
-    csv_path = csv_dir / "blockwise_mse.csv"
+    out_dirs = get_model_output_dir(config, model_name)
+    csv_path = out_dirs["csv"] / "blockwise_mse.csv"
     frame.to_csv(csv_path, index=False)
     return frame
 
 
-def step_bin_sweep(model: nn.Module, loader: DataLoader, device: torch.device, seed: int, csv_dir: Path):
-    print("\n[4/4] Bin sweep ...")
-    blocks = list(model.iter_residual_blocks())
-    bin_configs = EXPERIMENT["bin_configs"]
-    temperatures = EXPERIMENT["temperature_points"]
-    all_temps = EXPERIMENT["bin_sweep_all_temps"]
+# ============================================================
+#  分档扫描
+# ============================================================
+
+def step_bin_sweep(
+    model: nn.Module, loader: DataLoader, device: torch.device,
+    seed: int, config: Dict[str, Any], model_name: str,
+) -> pd.DataFrame:
+    print(f"\n[4/4] Bin sweep — {model_name} ...")
+    model_cfg = config["models"][model_name]
+    arch = model_cfg["arch"]
+    blocks = get_injection_points(model, arch)
+
+    bin_configs = config["nonideal"]["bins"]
+    active_sweep = bin_configs.get("active_sweep", list(bin_configs.keys()))
+    temperatures = get_temperature_points(config)
+    all_temps = config["temperature"]["bin_sweep_all_temps"]
 
     hook_managers = {}
-    for bin_label, bin_edges in bin_configs.items():
-        cfg = _make_improved_config(bin_label)
-        hook_managers[bin_label] = _make_hook_manager(blocks, cfg, seed)
+    for bin_label in active_sweep:
+        imp = dict(config["nonideal"]["improved"])
+        imp["bin_edges"] = bin_configs[bin_label]
+        hook_managers[bin_label] = _make_hook_manager(
+            blocks, _make_nonideal_config(imp), seed)
 
-    eval_temps = temperatures if all_temps else [EXPERIMENT["temperature_points"][-3]]
+    eval_temps = temperatures if all_temps else [config["temperature"]["block_mse_temperature"]]
 
     rows = []
     for bin_label, hooks in hook_managers.items():
@@ -316,19 +261,27 @@ def step_bin_sweep(model: nn.Module, loader: DataLoader, device: torch.device, s
             acc = evaluate_accuracy(model, loader, device, hooks, temp, seed)
             rows.append({"bins": bin_label, "temperature": temp, "accuracy": acc})
             accs.append(acc)
-            print(f"  {bin_label}-bin  T={temp:>5.0f}°C  Acc={acc:.4f}")
         mean_acc = sum(accs) / len(accs)
         rows.append({"bins": bin_label, "temperature": "mean", "accuracy": mean_acc})
         print(f"  {bin_label}-bin  MEAN  Acc={mean_acc:.4f}")
 
     frame = pd.DataFrame(rows)
-    csv_path = csv_dir / "bin_sweep.csv"
+    out_dirs = get_model_output_dir(config, model_name)
+    csv_path = out_dirs["csv"] / "bin_sweep.csv"
     frame.to_csv(csv_path, index=False)
     return frame
 
 
-def step_plot(csv_dir: Path, figure_dir: Path):
-    print("\n[plot] Generating figures ...")
+# ============================================================
+#  画图
+# ============================================================
+
+def step_plot(config: Dict[str, Any], model_name: str):
+    out_dirs = get_model_output_dir(config, model_name)
+    csv_dir = out_dirs["csv"]
+    figure_dir = out_dirs["figure"]
+
+    print(f"\n[plot] Generating figures — {model_name} ...")
     plt.style.use("default")
     ensure_dir(figure_dir)
 
@@ -337,12 +290,12 @@ def step_plot(csv_dir: Path, figure_dir: Path):
     mse_frame = pd.read_csv(csv_dir / "blockwise_mse.csv")
     bin_frame = pd.read_csv(csv_dir / "bin_sweep.csv")
 
-    _plot_accuracy_vs_temperature(temp_frame, figure_dir)
-    _plot_accuracy_vs_noise(noise_frame, figure_dir)
-    _plot_block_mse(mse_frame, figure_dir)
-    _plot_recovery_ratio(temp_frame, figure_dir)
-    _plot_bin_sweep(bin_frame, figure_dir)
-    print(f"[plot] saved to {figure_dir}")
+    _plot_accuracy_vs_temperature(temp_frame, figure_dir, model_name)
+    _plot_accuracy_vs_noise(noise_frame, figure_dir, model_name)
+    _plot_block_mse(mse_frame, figure_dir, model_name)
+    _plot_recovery_ratio(temp_frame, figure_dir, model_name)
+    _plot_bin_sweep(bin_frame, figure_dir, model_name)
+    print(f"[plot] {model_name}: saved to {figure_dir}")
 
 
 def _save_figure(fig: plt.Figure, path: Path):
@@ -352,65 +305,67 @@ def _save_figure(fig: plt.Figure, path: Path):
     plt.close(fig)
 
 
-def _plot_accuracy_vs_temperature(frame: pd.DataFrame, figure_dir: Path):
+def _plot_accuracy_vs_temperature(frame: pd.DataFrame, figure_dir: Path, tag: str):
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.plot(frame["temperature"], frame["ideal"], marker="o", linewidth=2, label="Ideal")
     ax.plot(frame["temperature"], frame["original"], marker="s", linewidth=2, label="Original")
     ax.plot(frame["temperature"], frame["improved"], marker="^", linewidth=2, label="Improved")
-    ax.axvline(85, linestyle="--", linewidth=1.2, color="#6c757d", alpha=0.7, label="High-temp boundary (85°C)")
-    ax.set_xlabel("Temperature (°C)")
+    ax.axvline(85, linestyle="--", linewidth=1.2, color="#6c757d", alpha=0.7,
+               label="High-temp boundary (85 C)")
+    ax.set_xlabel("Temperature (C)")
     ax.set_ylabel("Accuracy")
-    ax.set_title("Accuracy vs Temperature")
+    ax.set_title(f"Accuracy vs Temperature — {tag}")
     ax.grid(alpha=0.25)
     ax.legend(frameon=False)
     _save_figure(fig, figure_dir / "accuracy_vs_temperature")
 
 
-def _plot_accuracy_vs_noise(frame: pd.DataFrame, figure_dir: Path):
+def _plot_accuracy_vs_noise(frame: pd.DataFrame, figure_dir: Path, tag: str):
     fig, ax = plt.subplots(figsize=(7, 4.5))
     ax.plot(frame["sigma"], frame["original"], marker="s", linewidth=2, label="Original")
     ax.plot(frame["sigma"], frame["improved"], marker="^", linewidth=2, label="Improved")
-    ax.set_xlabel("σ₀ (noise strength)")
+    ax.set_xlabel("sigma_0 (noise strength)")
     ax.set_ylabel("Accuracy")
-    ax.set_title("Accuracy vs Noise")
+    ax.set_title(f"Accuracy vs Noise — {tag}")
     ax.grid(alpha=0.25)
     ax.legend(frameon=False)
     _save_figure(fig, figure_dir / "accuracy_vs_noise")
 
 
-def _plot_block_mse(frame: pd.DataFrame, figure_dir: Path):
+def _plot_block_mse(frame: pd.DataFrame, figure_dir: Path, tag: str):
     fig, ax = plt.subplots(figsize=(8, 4.5))
     x = range(len(frame))
     ax.plot(x, frame["original_mse"], marker="s", linewidth=2, label="Original")
     ax.plot(x, frame["improved_mse"], marker="^", linewidth=2, label="Improved")
     ax.set_xticks(list(x))
     ax.set_xticklabels(frame["block"], rotation=45, ha="right")
-    ax.set_xlabel("Residual Block")
+    ax.set_xlabel("Block")
     ax.set_ylabel("Feature MSE")
-    ax.set_title("Block-wise Feature MSE")
+    ax.set_title(f"Block-wise Feature MSE — {tag}")
     ax.grid(alpha=0.25)
     ax.legend(frameon=False)
     _save_figure(fig, figure_dir / "blockwise_feature_mse")
 
 
-def _plot_recovery_ratio(frame: pd.DataFrame, figure_dir: Path):
+def _plot_recovery_ratio(frame: pd.DataFrame, figure_dir: Path, tag: str):
     fig, ax = plt.subplots(figsize=(7, 4.5))
-    ax.plot(frame["temperature"], frame["recovery_ratio"], marker="o", linewidth=2, color="#2a6f97")
+    ax.plot(frame["temperature"], frame["recovery_ratio"], marker="o", linewidth=2,
+            color="#2a6f97")
     ax.axvline(85, linestyle="--", linewidth=1.2, color="#6c757d", alpha=0.7)
-    ax.set_xlabel("Temperature (°C)")
+    ax.set_xlabel("Temperature (C)")
     ax.set_ylabel("Recovery Ratio")
-    ax.set_title("Accuracy Recovery Ratio")
+    ax.set_title(f"Accuracy Recovery Ratio — {tag}")
     ax.grid(alpha=0.25)
     _save_figure(fig, figure_dir / "accuracy_recovery_ratio")
 
 
-def _plot_bin_sweep(frame: pd.DataFrame, figure_dir: Path):
+def _plot_bin_sweep(frame: pd.DataFrame, figure_dir: Path, tag: str):
     mean_frame = frame[frame["temperature"] == "mean"].copy()
     if len(mean_frame) == 0:
         mean_frame = frame.copy()
 
     fig, ax = plt.subplots(figsize=(6.5, 4.5))
-    colors = ["#8ecae6", "#219ebc", "#023047", "#ffb703", "#fb8500"]
+    colors = ["#8ecae6", "#219ebc", "#023047", "#ffb703", "#fb8500", "#a96b2d"]
     bars = ax.bar(
         mean_frame["bins"].astype(str),
         mean_frame["accuracy"],
@@ -421,13 +376,11 @@ def _plot_bin_sweep(frame: pd.DataFrame, figure_dir: Path):
             bar.get_x() + bar.get_width() / 2,
             bar.get_height() + 0.002,
             f"{acc:.2%}",
-            ha="center",
-            va="bottom",
-            fontsize=10,
+            ha="center", va="bottom", fontsize=10,
         )
     ax.set_xlabel("Compensation Bins")
     ax.set_ylabel("Accuracy (mean over temperatures)")
-    ax.set_title("Compensation Bin Sweep (full-range average)")
+    ax.set_title(f"Compensation Bin Sweep — {tag}")
     ax.grid(axis="y", alpha=0.25)
     _save_figure(fig, figure_dir / "compensation_bin_sweep")
 
@@ -438,54 +391,78 @@ def _plot_bin_sweep(frame: pd.DataFrame, figure_dir: Path):
     fig2, ax2 = plt.subplots(figsize=(8, 5))
     for bin_label in detail["bins"].unique():
         sub = detail[detail["bins"] == bin_label]
-        ax2.plot(sub["temperature"], sub["accuracy"], marker="o", linewidth=1.8, label=f"{bin_label}-bin")
+        ax2.plot(sub["temperature"], sub["accuracy"], marker="o", linewidth=1.8,
+                 label=f"{bin_label}-bin")
     ax2.axvline(85, linestyle="--", linewidth=1.2, color="#6c757d", alpha=0.7)
-    ax2.set_xlabel("Temperature (°C)")
+    ax2.set_xlabel("Temperature (C)")
     ax2.set_ylabel("Accuracy")
-    ax2.set_title("Bin Sweep: Accuracy vs Temperature")
+    ax2.set_title(f"Bin Sweep: Accuracy vs Temperature — {tag}")
     ax2.grid(alpha=0.25)
     ax2.legend(frameon=False)
     _save_figure(fig2, figure_dir / "bin_sweep_vs_temperature")
 
 
+# ============================================================
+#  主入口
+# ============================================================
+
 def main():
-    parser = argparse.ArgumentParser(description="Run full experiment with centralized config.")
-    parser.add_argument("--skip-train", action="store_true", help="Skip training, use existing checkpoint.")
+    parser = argparse.ArgumentParser(description="Run full experiment with unified config.")
+    parser.add_argument("--skip-train", action="store_true",
+                        help="Skip training, use existing checkpoint.")
+    parser.add_argument("--models", type=str, default=None,
+                        help="Comma-separated model names (overrides config).")
+    parser.add_argument("--epochs", type=int, default=None,
+                        help="Override config epochs (for quick validation).")
+    parser.add_argument("--config", type=str, default=None,
+                        help="Path to experiment YAML config.")
     args = parser.parse_args()
 
-    config = _build_base_config()
-    seed = config["system"]["seed"]
-    seed_everything(seed, config["system"]["deterministic"])
-    device = select_device(config["system"]["device"])
+    config_path = args.config or (ROOT / "configs" / "experiment.yaml")
+    config = load_experiment_config(Path(config_path))
 
-    csv_dir = ensure_dir(config["outputs"]["csv_dir"])
-    figure_dir = ensure_dir(config["outputs"]["figure_dir"])
+    if args.epochs is not None:
+        config["train"]["epochs"] = args.epochs
 
-    if args.skip_train:
-        checkpoint_path = Path(config["outputs"]["checkpoint_dir"]) / "best.pt"
-        if not checkpoint_path.exists():
-            print(f"[error] checkpoint not found: {checkpoint_path}")
-            print("        run without --skip-train first, or check the path.")
-            sys.exit(1)
-    else:
-        checkpoint_path = step_train()
+    active_models: list[str] = args.models.split(",") if args.models else config["models"]["active"]
 
-    print(f"\n[load] checkpoint={checkpoint_path}")
-    _, test_loader = build_cifar10_loaders(config, train=False)
-    model = resnet18_cifar(
-        num_classes=config["dataset"]["num_classes"],
-        base_channels=config["model"]["base_channels"],
-    )
-    load_checkpoint(checkpoint_path, model)
-    model.to(device)
+    system_cfg = config["system"]
+    seed_everything(system_cfg["seed"], system_cfg["deterministic"])
+    device = select_device(system_cfg["device"])
 
-    step_temperature_scan(model, test_loader, device, seed, csv_dir)
-    step_noise_scan(model, test_loader, device, seed, csv_dir)
-    step_block_mse(model, test_loader, device, seed, csv_dir)
-    step_bin_sweep(model, test_loader, device, seed, csv_dir)
-    step_plot(csv_dir, figure_dir)
+    temperatures = get_temperature_points(config)
+    print(f"Temperature range: {temperatures[0]} – {temperatures[-1]} C "
+          f"({len(temperatures)} points, step {config['temperature']['step']} C)")
+    print(f"Models: {active_models}")
 
-    print("\n✓ All experiments completed.")
+    for model_name in active_models:
+        print(f"\n{'='*60}")
+        print(f"  MODEL: {model_name}")
+        print(f"{'='*60}")
+
+        checkpoint_path = step_train(config, model_name, skip=args.skip_train)
+        if checkpoint_path is None:
+            print(f"[error] No checkpoint for {model_name}, skipping evaluation.")
+            continue
+
+        print(f"\n[load] {model_name}: checkpoint={checkpoint_path}")
+        _, test_loader = build_cifar10_loaders(config, train=False)
+        model = create_model(
+            model_name,
+            config["models"][model_name],
+            num_classes=config["dataset"]["num_classes"],
+        )
+        load_checkpoint(checkpoint_path, model)
+        model.to(device)
+
+        seed = system_cfg["seed"]
+        step_temperature_scan(model, test_loader, device, seed, config, model_name)
+        step_noise_scan(model, test_loader, device, seed, config, model_name)
+        step_block_mse(model, test_loader, device, seed, config, model_name)
+        step_bin_sweep(model, test_loader, device, seed, config, model_name)
+        step_plot(config, model_name)
+
+    print("\nAll experiments completed.")
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 
 from .metrics import aggregate_feature_mse, recovery_ratio, update_accuracy_counts
 from .utils import ensure_dir
-from nonideal.hooks import NonIdealHookManager
+from nonideal.hooks import NonIdealHookManager, hook_session
 
 
 @torch.no_grad()
@@ -28,22 +28,22 @@ def evaluate_accuracy(
     total = 0
 
     if hook_manager is not None:
-        hook_manager.attach()
-        hook_manager.set_temperature(temperature)
-        hook_manager.clear()
-        if noise_seed is not None:
-            hook_manager.set_noise_seed(noise_seed)
-
-    for images, targets in loader:
-        images = images.to(device, non_blocking=True)
-        targets = targets.to(device, non_blocking=True)
-        logits = model(images)
-        batch_correct, batch_total = update_accuracy_counts(logits, targets)
-        correct += batch_correct
-        total += batch_total
-
-    if hook_manager is not None:
-        hook_manager.remove()
+        with hook_session(hook_manager, temperature, noise_seed):
+            for images, targets in loader:
+                images = images.to(device, non_blocking=True)
+                targets = targets.to(device, non_blocking=True)
+                logits = model(images)
+                batch_correct, batch_total = update_accuracy_counts(logits, targets)
+                correct += batch_correct
+                total += batch_total
+    else:
+        for images, targets in loader:
+            images = images.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+            logits = model(images)
+            batch_correct, batch_total = update_accuracy_counts(logits, targets)
+            correct += batch_correct
+            total += batch_total
 
     return correct / max(total, 1)
 
@@ -65,22 +65,15 @@ def evaluate_blockwise_mse(
     for images, _targets in loader:
         images = images.to(device, non_blocking=True)
 
-        ideal_hooks.attach()
-        ideal_hooks.set_mode("capture_only")
-        ideal_hooks.set_temperature(temperature)
-        ideal_hooks.clear()
-        _ = model(images)
-        ideal_features = ideal_hooks.last_features()
-        ideal_hooks.remove()
+        with hook_session(ideal_hooks, temperature, noise_seed):
+            ideal_hooks.set_mode("capture_only")
+            _ = model(images)
+            ideal_features = ideal_hooks.last_features()
 
-        nonideal_hooks.attach()
-        nonideal_hooks.set_mode("replace_with_nonideal")
-        nonideal_hooks.set_temperature(temperature)
-        nonideal_hooks.set_noise_seed(noise_seed)
-        nonideal_hooks.clear()
-        _ = model(images)
-        nonideal_features = nonideal_hooks.last_features()
-        nonideal_hooks.remove()
+        with hook_session(nonideal_hooks, temperature, noise_seed):
+            nonideal_hooks.set_mode("replace_with_nonideal")
+            _ = model(images)
+            nonideal_features = nonideal_hooks.last_features()
 
         for name, ideal_feature in ideal_features.items():
             candidate = nonideal_features[name]
@@ -147,20 +140,18 @@ def run_noise_scan(
 
     try:
         for sigma0 in sigma_values:
-            original_module.config = type(original_module.config)(**{**original_module.config.__dict__, "sigma0": sigma0})
-            improved_module.config = type(improved_module.config)(**{**improved_module.config.__dict__, "sigma0": sigma0})
+            original_module.config = type(original_module.config)(
+                **{**original_module.config.__dict__, "sigma0": sigma0})
+            improved_module.config = type(improved_module.config)(
+                **{**improved_module.config.__dict__, "sigma0": sigma0})
             original_acc = evaluate_accuracy(model, loader, device, original_hooks, temperature, noise_seed)
             improved_acc = evaluate_accuracy(model, loader, device, improved_hooks, temperature, noise_seed)
-            rows.append(
-                {
-                    "sigma": sigma0,
-                    "original": original_acc,
-                    "improved": improved_acc,
-                }
-            )
+            rows.append({"sigma": sigma0, "original": original_acc, "improved": improved_acc})
     finally:
-        original_module.config = type(original_module.config)(**{**original_module.config.__dict__, "sigma0": original_base_sigma})
-        improved_module.config = type(improved_module.config)(**{**improved_module.config.__dict__, "sigma0": improved_base_sigma})
+        original_module.config = type(original_module.config)(
+            **{**original_module.config.__dict__, "sigma0": original_base_sigma})
+        improved_module.config = type(improved_module.config)(
+            **{**improved_module.config.__dict__, "sigma0": improved_base_sigma})
 
     frame = pd.DataFrame(rows)
     if output_path is not None:
@@ -193,13 +184,11 @@ def run_bin_sweep(
             rows.append({"bins": label, "accuracy": accuracy, "temperature": temp})
 
         if len(temperatures) > 1:
-            rows.append(
-                {
-                    "bins": label,
-                    "accuracy": sum(accuracies) / len(accuracies),
-                    "temperature": "mean",
-                }
-            )
+            rows.append({
+                "bins": label,
+                "accuracy": sum(accuracies) / len(accuracies),
+                "temperature": "mean",
+            })
 
     frame = pd.DataFrame(rows)
     if output_path is not None:

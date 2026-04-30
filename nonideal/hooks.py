@@ -8,8 +8,9 @@
 from __future__ import annotations
 
 from collections import OrderedDict
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Literal, Optional, Tuple
+from typing import Dict, Generator, Iterable, List, Literal, Optional, Tuple
 
 from torch import Tensor, nn
 from torch.utils.hooks import RemovableHandle
@@ -93,3 +94,21 @@ class NonIdealHookManager:
             return None
 
         return hook
+
+
+@contextmanager
+def hook_session(
+    hook_manager: NonIdealHookManager,
+    temperature: float = 25.0,
+    noise_seed: int | None = None,
+) -> Generator[NonIdealHookManager, None, None]:
+    """Context manager that attaches hooks and guarantees cleanup."""
+    hook_manager.attach()
+    hook_manager.set_temperature(temperature)
+    hook_manager.clear()
+    if noise_seed is not None:
+        hook_manager.set_noise_seed(noise_seed)
+    try:
+        yield hook_manager
+    finally:
+        hook_manager.remove()
