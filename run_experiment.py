@@ -51,17 +51,21 @@ from nonideal.temp_model import NonIdealConfig, TemperatureNonIdeality
 #  配置构建
 # ============================================================
 
-def _make_nonideal_config(params: Dict[str, Any]) -> NonIdealConfig:
-    return NonIdealConfig.from_dict(params)
+def _make_nonideal_config(params: Dict[str, Any], config: Dict[str, Any] | None = None) -> NonIdealConfig:
+    """Build a NonIdealConfig, adding default 4-bin edges for improved mode."""
+    p = dict(params)
+    if p.get("mode") == "improved" and "bin_edges" not in p and config is not None:
+        p["bin_edges"] = config["nonideal"]["bins"].get("4", [0, 28, 55, 83, 110])
+    return NonIdealConfig.from_dict(p)
 
 
 def _make_hook_manager(
-    blocks: list, config: NonIdealConfig, seed: int,
+    blocks: list, ncfg: NonIdealConfig, seed: int,
     mode: str = "replace_with_nonideal",
 ) -> NonIdealHookManager:
     return NonIdealHookManager(
         blocks,
-        TemperatureNonIdeality(config, noise_seed=seed),
+        TemperatureNonIdeality(ncfg, noise_seed=seed),
         mode=mode,
     )
 
@@ -108,7 +112,7 @@ def step_temperature_scan(
 
     ideal_hooks = NonIdealHookManager(blocks, nonideality=None, mode="capture_only")
     orig_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["original"]), seed)
-    imp_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["improved"]), seed)
+    imp_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["improved"], config), seed)
 
     temperatures = get_temperature_points(config)
     rows = []
@@ -149,7 +153,7 @@ def step_noise_scan(
     blocks = get_injection_points(model, arch)
 
     orig_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["original"]), seed)
-    imp_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["improved"]), seed)
+    imp_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["improved"], config), seed)
 
     tcfg = config["temperature"]
     temperature = tcfg["noise_temperature"]
@@ -201,7 +205,7 @@ def step_block_mse(
 
     ideal_hooks = NonIdealHookManager(blocks, nonideality=None, mode="capture_only")
     orig_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["original"]), seed)
-    imp_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["improved"]), seed)
+    imp_hooks = _make_hook_manager(blocks, _make_nonideal_config(config["nonideal"]["improved"], config), seed)
 
     orig_mse = evaluate_blockwise_mse(model, loader, device, ideal_hooks, orig_hooks, temperature, seed)
     imp_mse = evaluate_blockwise_mse(model, loader, device, ideal_hooks, imp_hooks, temperature, seed)
