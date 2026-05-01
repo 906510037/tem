@@ -38,7 +38,7 @@ models:
 # Training
 # -----------------------------------------------------------
 train:
-  epochs: 200
+  epochs: 30
   lr: 0.1
   momentum: 0.9
   weight_decay: 0.0005
@@ -76,23 +76,23 @@ temperature:
 nonideal:
   original:
     mode: original
-    ka: 0.00065
-    kb: 0.00025
-    sigma0: 0.030
-    lam: 0.008
-    nominal_gain: 0.980
+    ka: 0.00040
+    kb: 0.00015
+    sigma0: 0.035
+    lam: 0.006
+    nominal_gain: 0.970
     nominal_bias: 0.0
 
   improved:
     mode: improved
-    ka: 0.00065
-    kb: 0.00025
-    sigma0: 0.030
-    lam: 0.008
-    rho: 0.55
-    nominal_gain: 0.980
+    ka: 0.00040
+    kb: 0.00015
+    sigma0: 0.035
+    lam: 0.006
+    rho: 0.75
+    nominal_gain: 0.970
     nominal_bias: 0.0
-    compensation_strength: 0.45
+    compensation_strength: 0.55
 
   bins:
     "2": [0, 55, 110]
