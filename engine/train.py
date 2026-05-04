@@ -10,9 +10,10 @@ from torch import nn
 from torch.optim import SGD, Optimizer
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR, LRScheduler
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from .metrics import update_accuracy_counts
-from .utils import ensure_dir, get_model_output_dir, save_checkpoint
+from .utils import get_model_output_dir, save_checkpoint
 
 
 @dataclass
@@ -58,13 +59,16 @@ def train_one_epoch(
     criterion: nn.Module,
     optimizer: Optimizer,
     device: torch.device,
+    epoch: int,
+    total_epochs: int,
     grad_clip_norm: float | None = None,
 ) -> float:
     model.train()
     correct = 0
     total = 0
 
-    for images, targets in loader:
+    pbar = tqdm(loader, desc=f"Epoch {epoch}/{total_epochs}", leave=False)
+    for images, targets in pbar:
         images = images.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
 
@@ -79,6 +83,7 @@ def train_one_epoch(
         batch_correct, batch_total = update_accuracy_counts(logits.detach(), targets)
         correct += batch_correct
         total += batch_total
+        pbar.set_postfix(acc=f"{correct / max(total, 1):.3f}")
 
     return correct / max(total, 1)
 
@@ -98,6 +103,31 @@ def validate(model: nn.Module, loader: DataLoader, device: torch.device) -> floa
     return correct / max(total, 1)
 
 
+def _print_params(config: Dict[str, Any], model_name: str, device: torch.device) -> None:
+    tcfg = config["train"]
+    print(f"\n{'='*55}")
+    print(f"  Model: {model_name}")
+    print(f"  Device: {device}")
+    print(f"  Epochs: {tcfg['epochs']},  LR: {tcfg['lr']},  Batch: {tcfg['batch_size']}")
+    print(f"  Optimizer: SGD+Nesterov, momentum={tcfg['momentum']}, "
+          f"weight_decay={tcfg['weight_decay']}")
+    print(f"  Scheduler: Warmup({tcfg.get('warmup_epochs', 0)}e) + CosineAnnealing")
+    print(f"  Label Smoothing: {tcfg.get('label_smoothing', 0)},  "
+          f"Grad Clip: {tcfg.get('grad_clip_norm', 'none')}")
+    print(f"  Cutout: {tcfg.get('cutout', False)}({tcfg.get('cutout_length', 0)})")
+    ncfg = config.get("nonideal", {})
+    if ncfg:
+        orig = ncfg.get("original", {})
+        impr = ncfg.get("improved", {})
+        print(f"  Non-Ideal Original: ka={orig.get('ka')}, kb={orig.get('kb')}, "
+              f"sigma0={orig.get('sigma0')}, lam={orig.get('lam')}, "
+              f"nom_gain={orig.get('nominal_gain')}")
+        print(f"  Non-Ideal Improved: ka={impr.get('ka')}, kb={impr.get('kb')}, "
+              f"sigma0={impr.get('sigma0')}, lam={impr.get('lam')}, "
+              f"rho={impr.get('rho')}, comp_strength={impr.get('compensation_strength')}")
+    print(f"{'='*55}")
+
+
 def fit(
     model: nn.Module,
     train_loader: DataLoader,
@@ -113,6 +143,9 @@ def fit(
     last_checkpoint = checkpoint_dir / "last.pt"
     log_path = log_dir / "train.log"
     topk = train_cfg.get("checkpoint_topk", 1)
+    total_epochs = train_cfg["epochs"]
+
+    _print_params(config, model_name, device)
 
     criterion = nn.CrossEntropyLoss(label_smoothing=train_cfg.get("label_smoothing", 0.0))
     optimizer = build_optimizer(model, config)
@@ -123,14 +156,16 @@ def fit(
     best_accuracy = 0.0
     last_accuracy = 0.0
 
-    # Min-heap of (accuracy, counter, path) — counter breaks ties for heapq
     topk_heap: list[tuple[float, int, Path]] = []
     counter = 0
 
     best_checkpoint = checkpoint_dir / "best.pt"
 
-    for epoch in range(1, train_cfg["epochs"] + 1):
-        train_acc = train_one_epoch(model, train_loader, criterion, optimizer, device, grad_clip_norm)
+    for epoch in range(1, total_epochs + 1):
+        train_acc = train_one_epoch(
+            model, train_loader, criterion, optimizer, device,
+            epoch, total_epochs, grad_clip_norm,
+        )
         val_acc = validate(model, test_loader, device)
         scheduler.step()
         last_accuracy = val_acc
@@ -160,7 +195,7 @@ def fit(
             f"val_acc={val_acc:.4f} "
             f"lr={scheduler.get_last_lr()[0]:.6f}"
         )
-        print(message)
+        tqdm.write(message)
         with log_path.open("a", encoding="utf-8") as handle:
             handle.write(message + "\n")
 

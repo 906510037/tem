@@ -2,186 +2,159 @@
 
 ## 1. 环境准备
 
-建议使用 Python 3.10 或更新版本，并在项目根目录安装依赖：
+Python 3.9+，安装依赖：
 
 ```bash
 pip install -r requirements.txt
 ```
 
-依赖包括：
+| 依赖 | 用途 |
+|---|---|
+| `torch` `torchvision` | 模型训练和推理 |
+| `PyYAML` | 配置文件解析 |
+| `numpy` `pandas` | 数据处理 |
+| `matplotlib` | 画图 |
+| `pytest` | 测试 |
 
-- `torch`
-- `torchvision`
-- `PyYAML`
-- `numpy`
-- `pandas`
-- `matplotlib`
-- `pytest`
+## 2. 快速开始
 
-## 2. 推荐运行方式
+所有参数统一由 `configs/experiment.yaml` 管理，**不再需要手动同步多个配置文件**。
 
-最推荐使用 `run_experiment.py`，因为所有关键参数都集中在文件顶部的 `EXPERIMENT` 字典中，方便调参和复现实验。
-
-完整运行训练、评估和画图：
+### 一键运行
 
 ```bash
+# 训练 + 评估 + 画图（默认 4 个模型）
 python run_experiment.py
+
+# 单模型（推荐用于快速验证）
+python run_experiment.py --models resnet18_cifar
+
+# GPU 环境
+python run_experiment.py --models resnet18_cifar --epochs 30
+
+# 服务器后台运行
+nohup python run_experiment.py --models resnet18_cifar --epochs 30 > experiment.log 2>&1 &
 ```
 
-如果已经有 `outputs/checkpoints/best.pt`，只重新评估和画图：
+### 跳过训练（已有 checkpoint）
 
 ```bash
 python run_experiment.py --skip-train
 ```
 
-运行结束后会生成：
+### 命令行覆盖
+
+```bash
+python run_experiment.py --models resnet18_cifar,resnet34_cifar --epochs 30
+```
+
+### 输出目录结构
 
 ```text
-outputs/checkpoints/best.pt
-outputs/csv/accuracy_vs_temp.csv
-outputs/csv/accuracy_vs_noise.csv
-outputs/csv/blockwise_mse.csv
-outputs/csv/bin_sweep.csv
-outputs/figures/*.png
-outputs/figures/*.pdf
-outputs/logs/
+outputs/
+  resnet18_cifar/
+    checkpoints/          # best.pt + top-3 checkpoints
+    csv/                  # accuracy_vs_temp.csv, accuracy_vs_noise.csv, blockwise_mse.csv, bin_sweep.csv
+    figures/              # *.png + *.pdf
+    log/                  # train.log
+  resnet34_cifar/
+  vgg16_cifar/
+  mobilenetv2_cifar/
 ```
 
-## 3. 分步骤运行方式
-
-如果不想用一键脚本，也可以按顺序运行 `scripts/` 下的脚本。
-
-训练 ResNet18：
-
-```bash
-python scripts/train_resnet18.py
-```
-
-温度扫描：
-
-```bash
-python scripts/eval_temperature.py
-```
-
-噪声扫描：
-
-```bash
-python scripts/eval_noise.py
-```
-
-导出逐块 MSE：
-
-```bash
-python scripts/export_block_mse.py
-```
-
-补偿分档扫描：
-
-```bash
-python scripts/eval_bin_sweep.py
-```
-
-生成图表：
-
-```bash
-python scripts/plot_results.py
-```
-
-旧的一键分步入口仍可使用：
-
-```bash
-python run_all.py
-```
-
-## 4. 重要配置位置
-
-| 文件 | 作用 |
-|---|---|
-| `run_experiment.py` | 推荐主入口，顶部 `EXPERIMENT` 管理一键实验参数 |
-| `configs/base.yaml` | 分步骤脚本的训练、评估、输出目录配置 |
-| `configs/temp_original.yaml` | `original` 非理想参数 |
-| `configs/temp_improved_2bin.yaml` | 2 档补偿配置 |
-| `configs/temp_improved_4bin.yaml` | 4 档补偿配置，分步骤脚本默认使用 |
-| `configs/temp_improved_6bin.yaml` | 6 档补偿配置 |
-
-调参时优先改 `run_experiment.py` 顶部参数。如果使用 `scripts/` 分步骤运行，就同步修改 `configs/*.yaml`。
-
-## 5. 数据集和 checkpoint
-
-CIFAR-10 数据默认放在：
+## 3. 输出目录
 
 ```text
-data/
+outputs/
+  resnet18_cifar/
+    checkpoints/  csv/  figures/  log/
+  resnet34_cifar/
+  resnet50_cifar/
+  cross_model/           # 三模型交叉对比图表
 ```
 
-训练好的模型默认保存到：
-
-```text
-outputs/checkpoints/best.pt
-```
-
-如果运行 `--skip-train` 时提示找不到 checkpoint，说明需要先运行完整训练：
+## 4. 分步骤运行
 
 ```bash
-python run_experiment.py
+python scripts/train_resnet18.py --model resnet18_cifar
+python scripts/eval_temperature.py --model resnet18_cifar
+python scripts/export_block_mse.py --model resnet18_cifar
+python scripts/plot_results.py --model resnet18_cifar
 ```
+
+## 4. 配置
+
+单文件 `configs/experiment.yaml`，全部参数集中在此：
+
+```yaml
+system:         # seed, device
+dataset:        # CIFAR-10 路径、类别数
+models:         # 模型列表和各自参数
+train:          # epochs, lr, batch_size, warmup, cutout ...
+eval:           # 评估 batch_size
+temperature:    # 0-110°C, step=2, noise/block_mse 温度
+nonideal:       # original/improved 非理想参数 + 分档定义
+outputs:        # 输出根目录
+```
+
+### 调参重点
+
+修改 `nonideal` 组来控制退化/补偿效果：
+
+| 参数 | 作用 | 调大 | 调小 |
+|---|---|---|---|
+| `ka` | 增益温度漂移系数 | 高温退化加快 | 高温退化减慢 |
+| `kb` | 偏移温度漂移系数 | 同上 | 同上 |
+| `sigma0` | 基准噪声强度 | 全温区退化增大 | 全温区退化减小 |
+| `lam` | 高温噪声增长系数 | 高温噪声更大 | 高温噪声更小 |
+| `nominal_gain` | 标称增益衰减 | 低温退化减小 | **低温退化增大** |
+| `rho` | 补偿噪声缩放 | **补偿减弱** | 补偿增强 |
+| `compensation_strength` | 补偿强度 | 补偿更接近档位中心 | 补偿减弱 |
+
+## 5. 可用模型
+
+| 模型名 | 架构 | 残差块数 | 块类型 |
+|---|---|---|---|
+| `resnet18_cifar` | ResNet18 | 8 | BasicBlock |
+| `resnet34_cifar` | ResNet34 | 16 | BasicBlock |
+| `resnet50_cifar` | ResNet50 | 16 | Bottleneck |
+
+添加新模型：创建模型文件 → `@register_model` + `@register_injection` 装饰器 → 在 `experiment.yaml` 的 `models.active` 中添加。
 
 ## 6. 测试
 
-运行单元测试：
-
 ```bash
-pytest
+pytest -v
 ```
 
-测试主要覆盖：
-
-- 指标计算
-- 温度行为模型
-- hook 注入逻辑
+26 个测试覆盖：配置加载、模型工厂、注入点注册、温度模型、hook 管理、指标计算。
 
 ## 7. 常见问题
 
-### 7.1 `outputs/csv/` 为空
-
-说明当前还没有用默认输出目录跑过实验。运行：
+### 服务器 GPU 被 `gpu_partition` 拦截
 
 ```bash
-python run_experiment.py
+# 方案一：只用 CPU
+CUDA_VISIBLE_DEVICES="" python run_experiment.py --models resnet18_cifar
+
+# 方案二：绕过（需确认不与其他用户冲突）
+LD_PRELOAD="" python run_experiment.py --models resnet18_cifar
 ```
 
-或已有 checkpoint 时运行：
+### Improved 补偿过强（太接近 Ideal）
 
-```bash
-python run_experiment.py --skip-train
-```
+优先调整：
+- 提高 `rho`（如 0.75 → 0.85）
+- 提高 `compensation_strength`（如 0.55 → 0.65）
 
-### 7.2 `original` 高温下降太厉害
+### Original 高温下降太快
 
 优先降低：
+- `ka`（如 0.00040 → 0.00030）
+- `lam`（如 0.006 → 0.004）
 
-- `ka`
-- `kb`
-- `lam`
+### Original 退化不足
 
-不要一开始就改 ResNet18 结构。只有参数已经很温和但仍然崩得太快时，再考虑减少注入的 residual block 数量。
-
-### 7.3 `improved` 太接近 `ideal`
-
-优先调整：
-
-- 提高 `rho`
-- 降低 `compensation_strength`
-- 减少分档数量
-
-### 7.4 `improved` 提升不明显
-
-优先调整：
-
-- 降低 `rho`
-- 提高 `compensation_strength`
-- 适当增加分档数量
-
-### 7.5 分步骤脚本和 `run_experiment.py` 结果不同
-
-这通常是因为两套入口的参数没有同步。`run_experiment.py` 使用顶部 `EXPERIMENT`，分步骤脚本使用 `configs/*.yaml`。正式实验前应固定一种入口，推荐固定使用 `run_experiment.py`。
+优先降低：
+- `nominal_gain`（如 0.960 → 0.940）
+- 提高 `sigma0`（如 0.040 → 0.050）

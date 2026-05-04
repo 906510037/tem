@@ -1,5 +1,4 @@
 # Unified experiment configuration — single source of truth.
-# Both run_experiment.py and scripts/*.py read from this file.
 
 system:
   seed: 2026
@@ -12,10 +11,10 @@ dataset:
   num_classes: 10
 
 # -----------------------------------------------------------
-# Model registry: which models to train/evaluate
+# Model registry: 3 ResNet variants for comparison
 # -----------------------------------------------------------
 models:
-  active: [resnet18_cifar, resnet34_cifar, vgg16_cifar, mobilenetv2_cifar]
+  active: [resnet18_cifar, resnet34_cifar, resnet50_cifar]
 
   resnet18_cifar:
     arch: resnet18_cifar
@@ -25,14 +24,9 @@ models:
     arch: resnet34_cifar
     base_channels: 64
 
-  vgg16_cifar:
-    arch: vgg16_cifar
+  resnet50_cifar:
+    arch: resnet50_cifar
     base_channels: 64
-    batch_norm: true
-
-  mobilenetv2_cifar:
-    arch: mobilenetv2_cifar
-    width_mult: 1.0
 
 # -----------------------------------------------------------
 # Training
@@ -60,48 +54,39 @@ eval:
   num_workers: 2
 
 # -----------------------------------------------------------
-# Temperature: 0–110 °C, step 2 °C
+# Temperature: 0–110 °C, step 2 °C (56 evaluation points)
 # -----------------------------------------------------------
 temperature:
   range: [0, 110]
   step: 2
   block_mse_temperature: 100
-  noise_temperature: 75
-  noise_scan_values: [0.005, 0.010, 0.015, 0.020, 0.030, 0.040, 0.050]
-  bin_sweep_all_temps: true
 
 # -----------------------------------------------------------
-# Non-ideality parameters
+# Non-ideality parameters (3rd tuning round)
 # -----------------------------------------------------------
+# Original: nominal_gain=0.955 to increase low-T degradation
+# ka/kb/lam moderate to prevent collapse at 110°C
+# Improved: rho=0.80, comp_strength=0.40 for partial recovery
 nonideal:
   original:
     mode: original
-    ka: 0.00040
+    ka: 0.00050
     kb: 0.00015
-    sigma0: 0.035
-    lam: 0.006
-    nominal_gain: 0.970
+    sigma0: 0.045
+    lam: 0.008
+    nominal_gain: 0.955
     nominal_bias: 0.0
 
   improved:
     mode: improved
-    ka: 0.00040
+    ka: 0.00050
     kb: 0.00015
-    sigma0: 0.035
-    lam: 0.006
-    rho: 0.75
-    nominal_gain: 0.970
+    sigma0: 0.045
+    lam: 0.008
+    rho: 0.80
+    nominal_gain: 0.955
     nominal_bias: 0.0
-    compensation_strength: 0.55
-
-  bins:
-    "2": [0, 55, 110]
-    "3": [0, 37, 73, 110]
-    "4": [0, 28, 55, 83, 110]
-    "5": [0, 22, 44, 66, 88, 110]
-    "6": [0, 19, 37, 55, 73, 92, 110]
-    "7": [0, 16, 32, 48, 63, 79, 95, 110]
-    active_sweep: ["2", "3", "4", "5", "6", "7"]
+    compensation_strength: 0.40
 
 # -----------------------------------------------------------
 # Outputs

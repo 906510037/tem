@@ -8,7 +8,7 @@ from typing import Dict, Iterable, List, Tuple
 import torch
 from torch import Tensor, nn
 
-from .blocks import BasicBlock
+from .blocks import BasicBlock, Bottleneck
 from .factory import register_model
 from .injection import InjectionPoints, register_injection
 
@@ -101,12 +101,18 @@ def build_resnet34_cifar(num_classes: int = 10, base_channels: int = 64) -> CIFA
     return CIFARResNet(BasicBlock, (3, 4, 6, 3), num_classes, base_channels)
 
 
+@register_model("resnet50_cifar")
+def build_resnet50_cifar(num_classes: int = 10, base_channels: int = 64) -> CIFARResNet:
+    return CIFARResNet(Bottleneck, (3, 4, 6, 3), num_classes, base_channels)
+
+
 # ---------------------------------------------------------------------------
 #  Injection points — registered in the injection registry
 # ---------------------------------------------------------------------------
 
 @register_injection("resnet18_cifar")
 @register_injection("resnet34_cifar")
+@register_injection("resnet50_cifar")
 def resnet_injection(model: CIFARResNet) -> InjectionPoints:
     return list(model.iter_residual_blocks())
 

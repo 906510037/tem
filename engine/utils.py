@@ -60,15 +60,6 @@ def _validate_config(config: Dict[str, Any]) -> None:
     if t_max > 110:
         raise ValueError(f"Maximum temperature {t_max} exceeds cap of 110 C")
 
-    for label, edges in config["nonideal"]["bins"].items():
-        if label == "active_sweep":
-            continue
-        if edges[0] > t_min or edges[-1] < t_max:
-            raise ValueError(
-                f"Bin config '{label}': edges {edges} do not cover "
-                f"temperature range [{t_min}, {t_max}]"
-            )
-
     for model_name in config["models"]["active"]:
         if model_name not in config["models"]:
             raise ValueError(f"Active model '{model_name}' has no config entry")
